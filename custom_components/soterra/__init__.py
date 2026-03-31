@@ -1,19 +1,19 @@
-"""Soterra Home Assistant Integration.
+"""Soterra Home Assistant Integration — device-centric integration.
 
-Sends real-time safety device state changes to the Soterra platform via
-webhooks. Supports smoke detectors, CO detectors, gas sensors, heat sensors,
-and leak detectors.
+Monitors HA devices (not raw entities) that contain safety-related sensors.
+Sends device-grouped discovery payloads and per-entity state updates to the
+Soterra webhook.
 
 Setup flow:
-1. User pastes their property's Soterra webhook URL
-2. User selects which safety entities to monitor
-3. Integration sends a discovery payload on setup
-4. State changes are pushed automatically from that point
-
-No polling — purely event-driven via HA's state change system.
+1. User pastes webhook URL
+2. Integration auto-discovers devices with safety entities
+3. User selects which devices to monitor (sees device names, not entity IDs)
+4. Discovery sends device-centric payload (device → entities)
+5. State changes push per-entity for real-time responsiveness
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -22,13 +22,17 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
+from .config_flow import discover_safety_devices
 from .const import (
-    CONF_ENTITIES,
+    CONF_DEVICES,
     CONF_WEBHOOK_URL,
     DISCOVERY_DELAY,
     DOMAIN,
+    EXTRA_DEVICE_CLASSES,
+    SAFETY_DEVICE_CLASSES,
     WEBHOOK_TIMEOUT,
 )
 
@@ -37,54 +41,64 @@ _LOGGER = logging.getLogger(__name__)
 type SoterraConfigEntry = ConfigEntry
 
 
+# =========================================================================
+# Setup / Teardown
+# =========================================================================
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: SoterraConfigEntry) -> bool:
     """Set up Soterra from a config entry."""
     webhook_url: str = entry.data[CONF_WEBHOOK_URL]
-    entities: list[str] = entry.options.get(CONF_ENTITIES, [])
+    selected_device_ids: list[str] = entry.options.get(CONF_DEVICES, [])
 
-    if not entities:
-        _LOGGER.warning("Soterra integration has no entities configured")
+    if not selected_device_ids:
+        _LOGGER.warning("Soterra: no devices selected")
         return True
 
-    # Store runtime data for cleanup
     hass.data.setdefault(DOMAIN, {})
 
-    # Register state change listener
-    unsub = _register_listeners(hass, entry, webhook_url, entities)
-    hass.data[DOMAIN][entry.entry_id] = {"unsub": unsub}
+    # Resolve all trackable entity IDs from selected devices
+    entity_ids = _resolve_entity_ids(hass, selected_device_ids)
+    if not entity_ids:
+        _LOGGER.warning("Soterra: selected devices have no trackable entities")
+        return True
 
-    # Send discovery payload (delayed slightly so all entities are ready)
-    async def _send_initial_discovery(_event: Event | None = None) -> None:
-        await _send_discovery(hass, webhook_url, entities)
+    _LOGGER.info(
+        "Soterra: monitoring %d devices (%d entities)",
+        len(selected_device_ids),
+        len(entity_ids),
+    )
 
+    # Register state listeners
+    unsub = _register_listeners(hass, entry, webhook_url, entity_ids)
+    hass.data[DOMAIN][entry.entry_id] = {
+        "unsub": unsub,
+        "device_ids": selected_device_ids,
+    }
+
+    # Send discovery
     if hass.is_running:
-        # HA already started — send discovery after a short delay
         entry.async_create_background_task(
             hass,
-            _delayed_discovery(hass, webhook_url, entities),
+            _delayed_discovery(hass, webhook_url, selected_device_ids),
             name="soterra_initial_discovery",
         )
     else:
-        # HA still starting — wait for start event
+        async def _on_start(_event: Event) -> None:
+            await _delayed_discovery(hass, webhook_url, selected_device_ids)
+
         entry.async_on_unload(
-            hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_STARTED, _send_initial_discovery
-            )
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_start)
         )
 
-    # Re-register listeners when options (entity list) change
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
-
-    _LOGGER.info(
-        "Soterra integration loaded: monitoring %d entities", len(entities)
-    )
     return True
 
 
 async def async_unload_entry(
     hass: HomeAssistant, entry: SoterraConfigEntry
 ) -> bool:
-    """Unload a config entry."""
+    """Unload."""
     data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     if data and "unsub" in data:
         data["unsub"]()
@@ -94,16 +108,50 @@ async def async_unload_entry(
 async def _async_options_updated(
     hass: HomeAssistant, entry: SoterraConfigEntry
 ) -> None:
-    """Handle options update — re-register listeners with new entity list."""
-    _LOGGER.info("Soterra entity list updated, re-registering listeners")
-
-    # Unload and reload to pick up new entities
+    """Handle device list change — reload."""
+    _LOGGER.info("Soterra: device selection changed, reloading")
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-# ==========================================================================
+# =========================================================================
+# Entity resolution
+# =========================================================================
+
+
+def _resolve_entity_ids(
+    hass: HomeAssistant, device_ids: list[str]
+) -> list[str]:
+    """Resolve all trackable entity IDs from a list of HA device IDs."""
+    ent_reg = er.async_get(hass)
+    entity_ids: list[str] = []
+
+    device_id_set = set(device_ids)
+    for entry in ent_reg.entities.values():
+        if entry.disabled or entry.device_id not in device_id_set:
+            continue
+
+        state = hass.states.get(entry.entity_id)
+        device_class = (
+            state.attributes.get("device_class")
+            if state
+            else entry.original_device_class
+        )
+
+        is_safety = (
+            entry.domain == "binary_sensor"
+            and device_class in SAFETY_DEVICE_CLASSES
+        )
+        is_extra = device_class in EXTRA_DEVICE_CLASSES
+
+        if is_safety or is_extra:
+            entity_ids.append(entry.entity_id)
+
+    return entity_ids
+
+
+# =========================================================================
 # State change listeners
-# ==========================================================================
+# =========================================================================
 
 
 @callback
@@ -111,93 +159,69 @@ def _register_listeners(
     hass: HomeAssistant,
     entry: SoterraConfigEntry,
     webhook_url: str,
-    entities: list[str],
+    entity_ids: list[str],
 ) -> callback:
-    """Register state change listeners for monitored entities."""
+    """Register listeners for all tracked entities."""
 
     async def _state_changed(event: Event) -> None:
-        """Handle a state change event."""
         new_state: State | None = event.data.get("new_state")
         old_state: State | None = event.data.get("old_state")
-
         if new_state is None:
             return
-
-        # Only fire when the state value changes (not attribute-only updates)
         if old_state is not None and old_state.state == new_state.state:
             return
 
         entity_id = event.data.get("entity_id", "")
-        _LOGGER.debug(
-            "Soterra state change: %s → %s", entity_id, new_state.state
-        )
-
+        _LOGGER.debug("Soterra state: %s → %s", entity_id, new_state.state)
         await _send_state_update(hass, webhook_url, entity_id, new_state)
 
-    unsub = async_track_state_change_event(hass, entities, _state_changed)
-    return unsub
+    return async_track_state_change_event(hass, entity_ids, _state_changed)
 
 
-# ==========================================================================
+# =========================================================================
 # Webhook payloads
-# ==========================================================================
+# =========================================================================
 
 
 async def _delayed_discovery(
-    hass: HomeAssistant, webhook_url: str, entities: list[str]
+    hass: HomeAssistant, webhook_url: str, device_ids: list[str]
 ) -> None:
-    """Wait briefly then send discovery."""
-    import asyncio
-
+    """Wait briefly then send device-centric discovery."""
     await asyncio.sleep(DISCOVERY_DELAY)
-    await _send_discovery(hass, webhook_url, entities)
+    await _send_discovery(hass, webhook_url, device_ids)
 
 
 async def _send_discovery(
-    hass: HomeAssistant, webhook_url: str, entities: list[str]
+    hass: HomeAssistant, webhook_url: str, device_ids: list[str]
 ) -> None:
-    """Send a discovery payload with all monitored entities."""
-    devices: list[dict[str, Any]] = []
+    """Send a device-centric discovery payload."""
+    all_devices = await hass.async_add_executor_job(
+        discover_safety_devices, hass
+    )
 
-    for entity_id in entities:
-        state = hass.states.get(entity_id)
-        if state is None:
+    payload_devices: list[dict[str, Any]] = []
+    for dev_id in device_ids:
+        info = all_devices.get(dev_id)
+        if not info:
             continue
 
-        area_entry = None
-        try:
-            # Resolve area name through entity → device → area chain
-            ent_reg = hass.helpers.entity_registry.async_get(hass)
-            ent_entry = ent_reg.async_get(entity_id)
-            if ent_entry:
-                # Entity-level area takes priority
-                if ent_entry.area_id:
-                    area_reg = hass.helpers.area_registry.async_get(hass)
-                    area_entry = area_reg.async_get_area(ent_entry.area_id)
-                elif ent_entry.device_id:
-                    dev_reg = hass.helpers.device_registry.async_get(hass)
-                    dev_entry = dev_reg.async_get(ent_entry.device_id)
-                    if dev_entry and dev_entry.area_id:
-                        area_reg = hass.helpers.area_registry.async_get(hass)
-                        area_entry = area_reg.async_get_area(dev_entry.area_id)
-        except Exception:  # noqa: BLE001
-            pass  # Area resolution is best-effort
-
-        area_name = area_entry.name if area_entry else "Unknown"
-
-        devices.append(
+        payload_devices.append(
             {
-                "entity_id": entity_id,
-                "friendly_name": state.attributes.get(
-                    "friendly_name", entity_id
-                ),
-                "device_class": state.attributes.get("device_class", ""),
-                "area": area_name,
-                "state": state.state,
-                "attributes": {
-                    "battery_level": state.attributes.get("battery_level"),
-                    "device_class": state.attributes.get("device_class", ""),
-                },
+                "device_id": dev_id,
+                "device_name": info["name"],
+                "manufacturer": info["manufacturer"],
+                "model": info["model"],
+                "area": info["area"],
+                "entities": [
+                    {
+                        "entity_id": e["entity_id"],
+                        "device_class": e["device_class"],
+                        "friendly_name": e["friendly_name"],
+                        "state": e["state"],
+                        "unit": e.get("unit", ""),
+                    }
+                    for e in info["entities"]
+                ],
             }
         )
 
@@ -210,16 +234,14 @@ async def _send_discovery(
     payload = {
         "type": "discovery",
         "ha_version": ha_version,
-        "devices": devices,
+        "devices": payload_devices,
     }
 
-    success = await _post_webhook(webhook_url, payload)
-    if success:
-        _LOGGER.info(
-            "Soterra discovery sent: %d devices reported", len(devices)
-        )
+    ok = await _post_webhook(webhook_url, payload)
+    if ok:
+        _LOGGER.info("Soterra discovery: %d devices sent", len(payload_devices))
     else:
-        _LOGGER.error("Failed to send Soterra discovery payload")
+        _LOGGER.error("Soterra discovery failed")
 
 
 async def _send_state_update(
@@ -228,8 +250,7 @@ async def _send_state_update(
     entity_id: str,
     new_state: State,
 ) -> None:
-    """Send a state update for a single entity."""
-    # Build a clean attributes dict (filter out large/irrelevant keys)
+    """Send per-entity state update (unchanged format — webapp routes it)."""
     attrs = dict(new_state.attributes)
     clean_attrs: dict[str, Any] = {}
     for key in (
@@ -238,6 +259,7 @@ async def _send_state_update(
         "friendly_name",
         "tampered",
         "signal_strength",
+        "unit_of_measurement",
     ):
         if key in attrs:
             clean_attrs[key] = attrs[key]
@@ -258,7 +280,7 @@ async def _send_state_update(
 
 
 async def _post_webhook(url: str, payload: dict[str, Any]) -> bool:
-    """Post a JSON payload to the Soterra webhook."""
+    """Post JSON to Soterra webhook."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -268,14 +290,12 @@ async def _post_webhook(url: str, payload: dict[str, Any]) -> bool:
             ) as resp:
                 if resp.status >= 400:
                     body = await resp.text()
-                    _LOGGER.warning(
-                        "Soterra webhook returned %d: %s", resp.status, body
-                    )
+                    _LOGGER.warning("Soterra webhook %d: %s", resp.status, body)
                     return False
                 return True
     except aiohttp.ClientError as err:
-        _LOGGER.error("Soterra webhook request failed: %s", err)
+        _LOGGER.error("Soterra webhook error: %s", err)
         return False
     except TimeoutError:
-        _LOGGER.error("Soterra webhook request timed out")
+        _LOGGER.error("Soterra webhook timeout")
         return False
