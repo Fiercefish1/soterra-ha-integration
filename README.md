@@ -2,7 +2,7 @@
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 
-Real-time safety device monitoring for [Soterra](https://app.soterra.co). Sends smoke detector, CO detector, gas sensor, heat sensor, and leak detector state changes to the Soterra platform for guest/owner push notifications.
+Smart home device integration for [Soterra](https://soterra.co). Sends entity state changes to the Soterra platform for guest/owner visibility and push notifications.
 
 ## Features
 
