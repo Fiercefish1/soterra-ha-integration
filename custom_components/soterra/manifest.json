@@ -1,6 +1,6 @@
 {
   "domain": "soterra",
-  "name": "Soterra Safety Monitoring",
+  "name": "Soterra Home Assistant Integration",
   "codeowners": ["@Fiercefish1"],
   "config_flow": true,
   "documentation": "https://github.com/Fiercefish1/soterra-ha-integration",

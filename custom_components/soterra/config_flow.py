@@ -84,7 +84,7 @@ class SoterraConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
 
                 return self.async_create_entry(
-                    title="Soterra Safety Monitoring",
+                    title="Soterra Home Assistant Integration",
                     data={CONF_WEBHOOK_URL: self._webhook_url},
                     options={CONF_ENTITIES: entities},
                 )

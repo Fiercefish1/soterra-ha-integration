@@ -1,4 +1,4 @@
-"""Soterra Safety Monitoring integration for Home Assistant.
+"""Soterra Home Assistant Integration.
 
 Sends real-time safety device state changes to the Soterra platform via
 webhooks. Supports smoke detectors, CO detectors, gas sensors, heat sensors,
