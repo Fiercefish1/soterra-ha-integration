@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import (
+    area_registry as ar,
     device_registry as dr,
     entity_registry as er,
     selector,
@@ -40,7 +41,7 @@ def discover_safety_devices(hass: HomeAssistant) -> dict[str, dict[str, Any]]:
     """
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
-    area_reg = hass.helpers.area_registry.async_get(hass)
+    area_reg = ar.async_get(hass)
 
     # Step 1: find all safety binary_sensor entities and their parent devices
     safety_entity_ids_by_device: dict[str, list[er.RegistryEntry]] = {}

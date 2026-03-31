@@ -22,7 +22,11 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import Event, HomeAssistant, State, callback
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+)
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .config_flow import discover_safety_devices
@@ -205,6 +209,40 @@ async def _send_discovery(
         if not info:
             continue
 
+        entities_out: list[dict[str, Any]] = []
+        for e in info["entities"]:
+            entity_id = e["entity_id"]
+            area_entry = None
+            try:
+                ent_reg = er.async_get(hass)
+                ent_entry = ent_reg.async_get(entity_id)
+                if ent_entry:
+                    if ent_entry.area_id:
+                        area_reg = ar.async_get(hass)
+                        area_entry = area_reg.async_get_area(ent_entry.area_id)
+                    elif ent_entry.device_id:
+                        dev_reg = dr.async_get(hass)
+                        dev_entry = dev_reg.async_get(ent_entry.device_id)
+                        if dev_entry and dev_entry.area_id:
+                            area_reg = ar.async_get(hass)
+                            area_entry = area_reg.async_get_area(dev_entry.area_id)
+            except Exception:
+                pass
+
+            entity_area = (
+                area_entry.name if area_entry else info["area"]
+            )
+            entities_out.append(
+                {
+                    "entity_id": e["entity_id"],
+                    "device_class": e["device_class"],
+                    "friendly_name": e["friendly_name"],
+                    "state": e["state"],
+                    "unit": e.get("unit", ""),
+                    "area": entity_area,
+                }
+            )
+
         payload_devices.append(
             {
                 "device_id": dev_id,
@@ -212,16 +250,7 @@ async def _send_discovery(
                 "manufacturer": info["manufacturer"],
                 "model": info["model"],
                 "area": info["area"],
-                "entities": [
-                    {
-                        "entity_id": e["entity_id"],
-                        "device_class": e["device_class"],
-                        "friendly_name": e["friendly_name"],
-                        "state": e["state"],
-                        "unit": e.get("unit", ""),
-                    }
-                    for e in info["entities"]
-                ],
+                "entities": entities_out,
             }
         )
 
