@@ -1,0 +1,42 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Soterra",
+        "description": "Enter the webhook URL from your property's Smart Home tab in the Soterra app.",
+        "data": {
+          "webhook_url": "Webhook URL"
+        },
+        "data_description": {
+          "webhook_url": "Paste the full URL from Soterra (starts with https://)"
+        }
+      },
+      "entities": {
+        "title": "Select Safety Devices",
+        "description": "Choose which safety devices to monitor. Soterra will receive state changes and send push notifications for alarms.",
+        "data": {
+          "entities": "Safety devices"
+        }
+      }
+    },
+    "error": {
+      "invalid_url": "Webhook URL must start with https://",
+      "cannot_connect": "Could not connect to the Soterra webhook. Check the URL and try again.",
+      "no_entities": "Please select at least one entity to monitor."
+    },
+    "abort": {
+      "already_configured": "This Soterra webhook is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Monitored Devices",
+        "description": "Add or remove safety devices. Changes take effect immediately — Soterra will be notified of the updated device list.",
+        "data": {
+          "entities": "Safety devices"
+        }
+      }
+    }
+  }
+}

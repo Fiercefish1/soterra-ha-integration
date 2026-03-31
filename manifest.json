@@ -1,0 +1,12 @@
+{
+  "domain": "soterra",
+  "name": "Soterra Safety Monitoring",
+  "codeowners": ["@Fiercefish1"],
+  "config_flow": true,
+  "documentation": "https://github.com/Fiercefish1/soterra-ha-integration",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/Fiercefish1/soterra-ha-integration/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
