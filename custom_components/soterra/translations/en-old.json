@@ -11,31 +11,30 @@
           "webhook_url": "Paste the full URL from Soterra (starts with https://)"
         }
       },
-      "devices": {
+      "entities": {
         "title": "Select Safety Devices",
-        "description": "These are the devices on your network that have safety sensors (smoke, CO, gas, heat, or leak). Select the ones installed at this Soterra property.",
+        "description": "Choose which safety devices to monitor. Soterra will receive state changes and send push notifications for alarms.",
         "data": {
-          "devices": "Devices to monitor"
+          "entities": "Safety devices"
         }
       }
     },
     "error": {
       "invalid_url": "Webhook URL must start with https://",
       "cannot_connect": "Could not connect to the Soterra webhook. Check the URL and try again.",
-      "no_devices": "Please select at least one device to monitor."
+      "no_entities": "Please select at least one entity to monitor."
     },
     "abort": {
-      "already_configured": "This Soterra webhook is already configured.",
-      "no_safety_devices": "No safety devices found. Soterra monitors binary_sensor entities with device classes: smoke, carbon_monoxide, gas, heat, moisture."
+      "already_configured": "This Soterra webhook is already configured."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Monitored Devices",
-        "description": "Add or remove devices. Changes take effect immediately — Soterra will receive an updated device inventory.",
+        "description": "Add or remove safety devices. Changes take effect immediately — Soterra will be notified of the updated device list.",
         "data": {
-          "devices": "Devices to monitor"
+          "entities": "Safety devices"
         }
       }
     }
