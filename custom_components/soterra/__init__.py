@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any
 
 import aiohttp
@@ -27,7 +28,10 @@ from homeassistant.helpers import (
     device_registry as dr,
     entity_registry as er,
 )
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_time_interval,
+)
 
 from .config_flow import discover_safety_devices
 from .const import (
@@ -37,6 +41,7 @@ from .const import (
     DOMAIN,
     EXTRA_DEVICE_CLASSES,
     SAFETY_DEVICE_CLASSES,
+    SYNC_INTERVAL_MINUTES,
     WEBHOOK_TIMEOUT,
 )
 
@@ -74,9 +79,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: SoterraConfigEntry) -> b
     )
 
     # Register state listeners
-    unsub = _register_listeners(hass, entry, webhook_url, entity_ids)
+    unsub_state = _register_listeners(hass, entry, webhook_url, entity_ids)
+
+    # Register hourly state sync (heartbeat + catch missed events)
+    unsub_interval = async_track_time_interval(
+        hass,
+        lambda _now: hass.async_create_task(
+            _send_periodic_sync(hass, webhook_url, entity_ids)
+        ),
+        timedelta(minutes=SYNC_INTERVAL_MINUTES),
+    )
+
     hass.data[DOMAIN][entry.entry_id] = {
-        "unsub": unsub,
+        "unsub": unsub_state,
+        "unsub_interval": unsub_interval,
         "device_ids": selected_device_ids,
     }
 
@@ -104,8 +120,11 @@ async def async_unload_entry(
 ) -> bool:
     """Unload."""
     data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    if data and "unsub" in data:
-        data["unsub"]()
+    if data:
+        if "unsub" in data:
+            data["unsub"]()
+        if "unsub_interval" in data:
+            data["unsub_interval"]()
     return True
 
 
@@ -306,6 +325,54 @@ async def _send_state_update(
     }
 
     await _post_webhook(webhook_url, payload)
+
+
+async def _send_periodic_sync(
+    hass: HomeAssistant,
+    webhook_url: str,
+    entity_ids: list[str],
+) -> None:
+    """Send current state of all tracked entities as a heartbeat."""
+    devices: list[dict[str, Any]] = []
+
+    for entity_id in entity_ids:
+        state = hass.states.get(entity_id)
+        if state is None:
+            continue
+
+        attrs = dict(state.attributes)
+        clean_attrs: dict[str, Any] = {}
+        for key in (
+            "battery_level",
+            "device_class",
+            "friendly_name",
+            "tampered",
+            "signal_strength",
+            "unit_of_measurement",
+        ):
+            if key in attrs:
+                clean_attrs[key] = attrs[key]
+
+        devices.append({
+            "entity_id": entity_id,
+            "state": state.state,
+            "attributes": clean_attrs,
+            "last_changed": state.last_changed.isoformat(),
+        })
+
+    if not devices:
+        return
+
+    payload = {
+        "type": "state_update",
+        "devices": devices,
+    }
+
+    ok = await _post_webhook(webhook_url, payload)
+    if ok:
+        _LOGGER.debug("Soterra periodic sync: %d entities sent", len(devices))
+    else:
+        _LOGGER.warning("Soterra periodic sync failed")
 
 
 async def _post_webhook(url: str, payload: dict[str, Any]) -> bool:

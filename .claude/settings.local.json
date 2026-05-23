@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($content = Get-Content c:\\\\Users\\\\onefi\\\\soterra-ha-integration\\\\.gitignore -Raw; if \\($null -eq $content\\) { Write-Output \"EMPTY_FILE\" } else { Write-Output \"LENGTH:$\\($content.Length\\)\"; Write-Output \"CONTENT:$content\" })"
+    ]
+  }
+}

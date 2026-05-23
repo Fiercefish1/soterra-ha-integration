@@ -25,3 +25,6 @@ WEBHOOK_TIMEOUT = 20
 
 # How long to wait after setup before sending discovery (seconds)
 DISCOVERY_DELAY = 2
+
+# How often to send a full state sync (minutes)
+SYNC_INTERVAL_MINUTES = 60
