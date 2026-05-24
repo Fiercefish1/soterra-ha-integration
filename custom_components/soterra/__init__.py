@@ -112,6 +112,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: SoterraConfigEntry) -> b
         )
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    # Register sensor platform
+    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+
     return True
 
 
@@ -125,6 +129,7 @@ async def async_unload_entry(
             data["unsub"]()
         if "unsub_interval" in data:
             data["unsub_interval"]()
+    await hass.config_entries.async_unload_platforms(entry, ["sensor"])
     return True
 
 
