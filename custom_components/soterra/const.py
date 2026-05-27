@@ -28,3 +28,7 @@ DISCOVERY_DELAY = 2
 
 # How often to send a full state sync (minutes)
 SYNC_INTERVAL_MINUTES = 60
+
+# Dispatcher signal fired (per entry_id) after a successful webhook publish.
+# Appended with the config entry_id: f"{SIGNAL_PUBLISH}_{entry_id}"
+SIGNAL_PUBLISH = f"{DOMAIN}_publish"

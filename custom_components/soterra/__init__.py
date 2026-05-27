@@ -28,10 +28,12 @@ from homeassistant.helpers import (
     device_registry as dr,
     entity_registry as er,
 )
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
 )
+from homeassistant.util import dt as dt_util
 
 from .config_flow import discover_safety_devices
 from .const import (
@@ -41,6 +43,7 @@ from .const import (
     DOMAIN,
     EXTRA_DEVICE_CLASSES,
     SAFETY_DEVICE_CLASSES,
+    SIGNAL_PUBLISH,
     SYNC_INTERVAL_MINUTES,
     WEBHOOK_TIMEOUT,
 )
@@ -60,17 +63,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: SoterraConfigEntry) -> b
     webhook_url: str = entry.data[CONF_WEBHOOK_URL]
     selected_device_ids: list[str] = entry.options.get(CONF_DEVICES, [])
 
-    if not selected_device_ids:
-        _LOGGER.warning("Soterra: no devices selected")
-        return True
-
     hass.data.setdefault(DOMAIN, {})
 
-    # Resolve all trackable entity IDs from selected devices
-    entity_ids = _resolve_entity_ids(hass, selected_device_ids)
-    if not entity_ids:
-        _LOGGER.warning("Soterra: selected devices have no trackable entities")
-        return True
+    # Resolve all trackable entity IDs from selected devices. This may be empty
+    # (no devices selected, or selected devices have no safety entities) — we
+    # still set up the heartbeat and status sensor so the backend gets a
+    # liveness ping and the user can see the integration's publish state.
+    entity_ids = (
+        _resolve_entity_ids(hass, selected_device_ids)
+        if selected_device_ids
+        else []
+    )
+
+    if not selected_device_ids:
+        _LOGGER.warning("Soterra: no devices selected; heartbeat only")
+    elif not entity_ids:
+        _LOGGER.warning(
+            "Soterra: selected devices have no trackable entities; heartbeat only"
+        )
 
     _LOGGER.info(
         "Soterra: monitoring %d devices (%d entities)",
@@ -78,38 +88,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: SoterraConfigEntry) -> b
         len(entity_ids),
     )
 
-    # Register state listeners
-    unsub_state = _register_listeners(hass, entry, webhook_url, entity_ids)
+    # Initialise runtime state (publish tracking consumed by the sensor).
+    runtime: dict[str, Any] = {
+        "device_ids": selected_device_ids,
+        "last_publish": None,
+        "last_payload_type": None,
+        "last_publish_count": 0,
+    }
+    hass.data[DOMAIN][entry.entry_id] = runtime
 
-    # Register hourly state sync (heartbeat + catch missed events)
-    unsub_interval = async_track_time_interval(
+    # Register state listeners (only when there are entities to track).
+    if entity_ids:
+        runtime["unsub"] = _register_listeners(
+            hass, entry, webhook_url, entity_ids
+        )
+
+    # Register hourly heartbeat / state sync — always, even with no entities.
+    runtime["unsub_interval"] = async_track_time_interval(
         hass,
         lambda _now: hass.async_create_task(
-            _send_periodic_sync(hass, webhook_url, entity_ids)
+            _send_periodic_sync(hass, entry, webhook_url, entity_ids)
         ),
         timedelta(minutes=SYNC_INTERVAL_MINUTES),
     )
 
-    hass.data[DOMAIN][entry.entry_id] = {
-        "unsub": unsub_state,
-        "unsub_interval": unsub_interval,
-        "device_ids": selected_device_ids,
-    }
+    # Send discovery (only when devices are selected).
+    if selected_device_ids:
+        if hass.is_running:
+            entry.async_create_background_task(
+                hass,
+                _delayed_discovery(hass, entry, webhook_url, selected_device_ids),
+                name="soterra_initial_discovery",
+            )
+        else:
+            async def _on_start(_event: Event) -> None:
+                await _delayed_discovery(
+                    hass, entry, webhook_url, selected_device_ids
+                )
 
-    # Send discovery
-    if hass.is_running:
-        entry.async_create_background_task(
-            hass,
-            _delayed_discovery(hass, webhook_url, selected_device_ids),
-            name="soterra_initial_discovery",
-        )
-    else:
-        async def _on_start(_event: Event) -> None:
-            await _delayed_discovery(hass, webhook_url, selected_device_ids)
-
-        entry.async_on_unload(
-            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_start)
-        )
+            entry.async_on_unload(
+                hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_start)
+            )
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
@@ -201,9 +220,39 @@ def _register_listeners(
 
         entity_id = event.data.get("entity_id", "")
         _LOGGER.debug("Soterra state: %s → %s", entity_id, new_state.state)
-        await _send_state_update(hass, webhook_url, entity_id, new_state)
+        await _send_state_update(hass, entry, webhook_url, entity_id, new_state)
 
     return async_track_state_change_event(hass, entity_ids, _state_changed)
+
+
+# =========================================================================
+# Publish tracking
+# =========================================================================
+
+
+@callback
+def _record_publish(
+    hass: HomeAssistant,
+    entry: SoterraConfigEntry,
+    payload_type: str,
+    count: int,
+) -> None:
+    """Record a successful publish and notify the status sensor."""
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if runtime is None:
+        return
+    runtime["last_publish"] = dt_util.utcnow()
+    runtime["last_payload_type"] = payload_type
+    runtime["last_publish_count"] = count
+    async_dispatcher_send(hass, f"{SIGNAL_PUBLISH}_{entry.entry_id}")
+
+
+def _ha_version(hass: HomeAssistant) -> str:
+    """Return the Home Assistant version, or 'unknown'."""
+    try:
+        return hass.config.version or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 # =========================================================================
@@ -212,15 +261,21 @@ def _register_listeners(
 
 
 async def _delayed_discovery(
-    hass: HomeAssistant, webhook_url: str, device_ids: list[str]
+    hass: HomeAssistant,
+    entry: SoterraConfigEntry,
+    webhook_url: str,
+    device_ids: list[str],
 ) -> None:
     """Wait briefly then send device-centric discovery."""
     await asyncio.sleep(DISCOVERY_DELAY)
-    await _send_discovery(hass, webhook_url, device_ids)
+    await _send_discovery(hass, entry, webhook_url, device_ids)
 
 
 async def _send_discovery(
-    hass: HomeAssistant, webhook_url: str, device_ids: list[str]
+    hass: HomeAssistant,
+    entry: SoterraConfigEntry,
+    webhook_url: str,
+    device_ids: list[str],
 ) -> None:
     """Send a device-centric discovery payload."""
     all_devices = await hass.async_add_executor_job(
@@ -278,20 +333,15 @@ async def _send_discovery(
             }
         )
 
-    ha_version = "unknown"
-    try:
-        ha_version = hass.config.version or "unknown"
-    except Exception:  # noqa: BLE001
-        pass
-
     payload = {
         "type": "discovery",
-        "ha_version": ha_version,
+        "ha_version": _ha_version(hass),
         "devices": payload_devices,
     }
 
     ok = await _post_webhook(webhook_url, payload)
     if ok:
+        _record_publish(hass, entry, "discovery", len(payload_devices))
         _LOGGER.info("Soterra discovery: %d devices sent", len(payload_devices))
     else:
         _LOGGER.error("Soterra discovery failed")
@@ -299,6 +349,7 @@ async def _send_discovery(
 
 async def _send_state_update(
     hass: HomeAssistant,
+    entry: SoterraConfigEntry,
     webhook_url: str,
     entity_id: str,
     new_state: State,
@@ -329,15 +380,23 @@ async def _send_state_update(
         ],
     }
 
-    await _post_webhook(webhook_url, payload)
+    if await _post_webhook(webhook_url, payload):
+        _record_publish(hass, entry, "state_update", 1)
 
 
 async def _send_periodic_sync(
     hass: HomeAssistant,
+    entry: SoterraConfigEntry,
     webhook_url: str,
     entity_ids: list[str],
 ) -> None:
-    """Send current state of all tracked entities as a heartbeat."""
+    """Send a heartbeat carrying the current state of all tracked entities.
+
+    Always sends — even with zero entities — so the backend gets a regular
+    liveness ping for the integration. Tagged with ``heartbeat: True`` and
+    integration metadata so the backend can distinguish it from a real-time
+    state change while keeping the same ``state_update`` payload shape.
+    """
     devices: list[dict[str, Any]] = []
 
     for entity_id in entity_ids:
@@ -365,19 +424,24 @@ async def _send_periodic_sync(
             "last_changed": state.last_changed.isoformat(),
         })
 
-    if not devices:
-        return
-
     payload = {
         "type": "state_update",
+        "heartbeat": True,
+        "integration": {
+            "entry_id": entry.entry_id,
+            "device_count": len(entry.options.get(CONF_DEVICES, [])),
+            "entity_count": len(devices),
+            "ha_version": _ha_version(hass),
+        },
         "devices": devices,
     }
 
     ok = await _post_webhook(webhook_url, payload)
     if ok:
-        _LOGGER.debug("Soterra periodic sync: %d entities sent", len(devices))
+        _record_publish(hass, entry, "heartbeat", len(devices))
+        _LOGGER.debug("Soterra heartbeat: %d entities sent", len(devices))
     else:
-        _LOGGER.warning("Soterra periodic sync failed")
+        _LOGGER.warning("Soterra heartbeat failed")
 
 
 async def _post_webhook(url: str, payload: dict[str, Any]) -> bool:
