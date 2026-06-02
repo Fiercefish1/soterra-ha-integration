@@ -22,7 +22,7 @@ import aiohttp
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
-from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.core import Event, HomeAssistant, ServiceCall, State, callback
 from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
@@ -51,6 +51,8 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 type SoterraConfigEntry = ConfigEntry
+
+SERVICE_SEND_HEARTBEAT = "send_heartbeat"
 
 
 # =========================================================================
@@ -131,6 +133,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: SoterraConfigEntry) -> b
             )
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    # Register the on-demand heartbeat service once (idempotent across entries).
+    if not hass.services.has_service(DOMAIN, SERVICE_SEND_HEARTBEAT):
+        async def _service_send_heartbeat(_call: ServiceCall) -> None:
+            """Fire a heartbeat for every loaded Soterra config entry."""
+            for entry_id in list(hass.data.get(DOMAIN, {})):
+                cfg = hass.config_entries.async_get_entry(entry_id)
+                if cfg is None:
+                    continue
+                url = cfg.data.get(CONF_WEBHOOK_URL)
+                if not url:
+                    continue
+                eids = _resolve_entity_ids(
+                    hass, cfg.options.get(CONF_DEVICES, [])
+                )
+                await _send_periodic_sync(hass, cfg, url, eids)
+
+        hass.services.async_register(
+            DOMAIN, SERVICE_SEND_HEARTBEAT, _service_send_heartbeat
+        )
 
     # Register sensor platform
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
@@ -424,6 +446,15 @@ async def _send_periodic_sync(
             "last_changed": state.last_changed.isoformat(),
         })
 
+    # Logged at INFO so the user can see every attempt — distinguishes
+    # "task not firing" (no log line) from "task firing but POST failing"
+    # (line + WARNING below).
+    _LOGGER.info(
+        "Soterra heartbeat firing: %d entities (entry %s)",
+        len(devices),
+        entry.entry_id,
+    )
+
     payload = {
         "type": "state_update",
         "heartbeat": True,
@@ -439,7 +470,7 @@ async def _send_periodic_sync(
     ok = await _post_webhook(webhook_url, payload)
     if ok:
         _record_publish(hass, entry, "heartbeat", len(devices))
-        _LOGGER.debug("Soterra heartbeat: %d entities sent", len(devices))
+        _LOGGER.info("Soterra heartbeat sent: %d entities", len(devices))
     else:
         _LOGGER.warning("Soterra heartbeat failed")
 
