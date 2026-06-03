@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -106,11 +106,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: SoterraConfigEntry) -> b
         )
 
     # Register hourly heartbeat / state sync — always, even with no entities.
+    # Must be an async callback so HA awaits it on the event loop; a sync
+    # callback would be dispatched via the executor thread pool, and the
+    # thread-safety check in hass.async_create_task would kill every tick
+    # before _send_periodic_sync ever ran.
+    async def _heartbeat_tick(_now: datetime) -> None:
+        await _send_periodic_sync(hass, entry, webhook_url, entity_ids)
+
     runtime["unsub_interval"] = async_track_time_interval(
         hass,
-        lambda _now: hass.async_create_task(
-            _send_periodic_sync(hass, entry, webhook_url, entity_ids)
-        ),
+        _heartbeat_tick,
         timedelta(minutes=SYNC_INTERVAL_MINUTES),
     )
 
