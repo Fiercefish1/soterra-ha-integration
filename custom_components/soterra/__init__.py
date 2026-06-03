@@ -133,9 +133,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: SoterraConfigEntry) -> b
                     hass, entry, webhook_url, selected_device_ids
                 )
 
-            entry.async_on_unload(
-                hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_start)
+            unsub_start = hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _on_start
             )
+
+            @callback
+            def _cleanup_start_listener() -> None:
+                # async_listen_once self-removes when the event fires; if
+                # the entry unloads after that, calling unsub() raises
+                # ValueError. Swallow it — the listener is already gone.
+                try:
+                    unsub_start()
+                except (ValueError, KeyError):
+                    pass
+
+            entry.async_on_unload(_cleanup_start_listener)
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
