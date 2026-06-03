@@ -1,0 +1,8 @@
+send_heartbeat:
+  name: Send heartbeat
+  description: >-
+    Fire an immediate heartbeat publish to the Soterra webhook for every
+    loaded config entry. Identical payload shape and contract to the
+    hourly scheduled heartbeat. Useful for verifying connectivity to the
+    Soterra backend on demand, or for wiring a custom schedule via an HA
+    automation.
