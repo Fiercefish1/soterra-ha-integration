@@ -47,6 +47,10 @@ The integration listens for state changes on your selected `binary_sensor` entit
 4. If the alarm clears within 30 seconds, no notification is sent (avoids false alarms)
 5. If the alarm clears after a notification was sent, a follow-up "all clear" notification is sent
 
+An hourly heartbeat (`state_update` with `heartbeat: true`) re-sends the current state of every tracked entity.
+
+Each entity in a `state_update` or heartbeat payload carries `state` (including `unavailable` / `unknown` as-is), `available`, `attributes`, `last_changed`, `last_updated`, and `last_reported`. Use `last_reported` for liveness: it moves whenever the device reports, even if the value is unchanged (falls back to `last_updated` on HA < 2024.3). `last_changed` only moves when the value changes.
+
 ## Managing Devices
 
 To add or remove monitored devices after setup:

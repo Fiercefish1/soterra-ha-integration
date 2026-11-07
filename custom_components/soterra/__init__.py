@@ -21,7 +21,7 @@ from typing import Any
 import aiohttp
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, STATE_UNAVAILABLE
 from homeassistant.core import Event, HomeAssistant, ServiceCall, State, callback
 from homeassistant.helpers import (
     area_registry as ar,
@@ -299,6 +299,46 @@ def _ha_version(hass: HomeAssistant) -> str:
 # =========================================================================
 
 
+_STATE_ATTRIBUTES = (
+    "battery_level",
+    "device_class",
+    "friendly_name",
+    "tampered",
+    "signal_strength",
+    "unit_of_measurement",
+)
+
+
+def _last_reported(state: State) -> datetime:
+    """Return when HA last heard from the entity.
+
+    ``State.last_reported`` (HA >= 2024.3) moves on every report, even when
+    the value is unchanged. Older cores lack it, so fall back to
+    ``last_updated`` (moves on any state or attribute change).
+    """
+    return getattr(state, "last_reported", None) or state.last_updated
+
+
+def _entity_payload(entity_id: str, state: State) -> dict[str, Any]:
+    """Build the per-entity dict shared by state_update and heartbeat payloads.
+
+    ``last_reported`` lets the backend tell a silent device from a healthy
+    one: heartbeats re-send HA's cached state, and ``last_changed`` only moves
+    when the value changes. ``unavailable`` is passed through as-is, with an
+    explicit ``available`` flag for convenience.
+    """
+    attrs = state.attributes
+    return {
+        "entity_id": entity_id,
+        "state": state.state,
+        "available": state.state != STATE_UNAVAILABLE,
+        "attributes": {k: attrs[k] for k in _STATE_ATTRIBUTES if k in attrs},
+        "last_changed": state.last_changed.isoformat(),
+        "last_updated": state.last_updated.isoformat(),
+        "last_reported": _last_reported(state).isoformat(),
+    }
+
+
 async def _delayed_discovery(
     hass: HomeAssistant,
     entry: SoterraConfigEntry,
@@ -393,30 +433,10 @@ async def _send_state_update(
     entity_id: str,
     new_state: State,
 ) -> None:
-    """Send per-entity state update (unchanged format — webapp routes it)."""
-    attrs = dict(new_state.attributes)
-    clean_attrs: dict[str, Any] = {}
-    for key in (
-        "battery_level",
-        "device_class",
-        "friendly_name",
-        "tampered",
-        "signal_strength",
-        "unit_of_measurement",
-    ):
-        if key in attrs:
-            clean_attrs[key] = attrs[key]
-
+    """Send a real-time per-entity state update."""
     payload = {
         "type": "state_update",
-        "devices": [
-            {
-                "entity_id": entity_id,
-                "state": new_state.state,
-                "attributes": clean_attrs,
-                "last_changed": new_state.last_changed.isoformat(),
-            }
-        ],
+        "devices": [_entity_payload(entity_id, new_state)],
     }
 
     if await _post_webhook(webhook_url, payload):
@@ -443,25 +463,7 @@ async def _send_periodic_sync(
         if state is None:
             continue
 
-        attrs = dict(state.attributes)
-        clean_attrs: dict[str, Any] = {}
-        for key in (
-            "battery_level",
-            "device_class",
-            "friendly_name",
-            "tampered",
-            "signal_strength",
-            "unit_of_measurement",
-        ):
-            if key in attrs:
-                clean_attrs[key] = attrs[key]
-
-        devices.append({
-            "entity_id": entity_id,
-            "state": state.state,
-            "attributes": clean_attrs,
-            "last_changed": state.last_changed.isoformat(),
-        })
+        devices.append(_entity_payload(entity_id, state))
 
     # Logged at INFO so the user can see every attempt — distinguishes
     # "task not firing" (no log line) from "task firing but POST failing"
